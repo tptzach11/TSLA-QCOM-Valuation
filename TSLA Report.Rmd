@@ -1,0 +1,119 @@
+---
+title: "TSLA Valuation Report"
+author: "Zach Dowdy"
+date: "7/11/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyquant)
+library(timetk)
+library(bayestestR)
+library(rstanarm)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+```
+
+```{r dataprep, include=F}
+source("TSLA Code.R")
+```
+
+# Introduction
+
+Over the past year or so, the Tesla stock price has grown to tremendous heights. While the self-driving and electric car technology is certainly valuable, its long-run prospects may not truly be reflected in its current share price. For one, Tesla has explicitly not obtained certain patents so that other companies can reproduce and improve upon the technology. This could mean that future market share, and consequently revenues, are not as certain to be continuously increasing.
+
+While there are certainly qualitative methods that can be used to determine the true value of Tesla, the current situation allows for the implementation of an interesting statistical technique: using a historical counter-factual. Qualcomm was in a relatively similar position around the year 2000. Even though Qualcomm did obtain patents, it is still clear in hindsight that the stock price at the time was severely over-valued.
+
+# Methodology
+
+Below we can see the path of adjusted stock prices for Tesla (TSLA) and Qualcomm (QCOM) surrounding their peak.
+
+```{r stock_plots, echo=F, warning=F}
+p1 <- QCOM %>%
+  ggplot(aes(x = date, y = adjusted)) +
+  geom_line() +
+  ggtitle("QCOM 1998-2003") +
+  labs(x = "Date", "Price") +
+  scale_x_date(date_breaks = "years", date_labels = "%Y") +
+  labs(x = "Date", y = "Adjusted Price") +
+  theme_economist_white()
+p2 <- TSLA %>%
+  ggplot(aes(x = date, y = adjusted)) +
+  geom_line() +
+  ggtitle("TSLA 2019-2021") +
+  labs(x = "Date", "Price") +
+  scale_x_date(date_breaks = "years", date_labels = "%Y") +
+  labs(x = "Date", y = "Adjusted Price") +
+  theme_economist_white()
+ggpubr::ggarrange(p1,p2, ncol=2)
+```
+
+2000 was the bubble year for QCOM, while 2021 may be the bubble year for TSLA. The central counter-factual assumption is that the year 2021 for TSLA is equivalent to the year 2000 for Qualcomm. In other words, where $t$ represents a year, we build our model assuming the expected values of the growth rates of free cash flows\footnote{Financial data for Tesla and Qualcomm were obtained from yahoo finance at https://finance.yahoo.com/quote/TSLA/financials?p=TSLA and https://finance.yahoo.com/quote/QCOM/financials?p=QCOM respectively} are equated as such:
+
+$$
+E[g_{TSLA}|t] \sim E[g_{QCOM}|t-21] 
+$$
+
+For example, the year 2018 for TSLA is assumed to be equivalent to the year 1997 for QCOM.
+
+We want to deduce the relationship $g_{TSLA,t} \sim g_{QCOM,t}$ using a Bayesian linear regression for the observable years. To start, we can look at the distribution of growth rates independent of time.
+
+```{r gTSLA_dist, echo=F, warning=F}
+p3 <- data.frame("Growth" = g_tsla) %>% ggplot(aes(x=Growth)) +
+  geom_histogram(aes(y = ..density..), bins = 5, color = "grey", fill = "forest green", alpha = 0.5) +
+  geom_density(alpha = 0.2) +
+  labs(x = "g_TSLA") +
+  theme_clean()
+p4 <- data.frame("Growth" = g_qcom) %>% ggplot(aes(x=Growth)) +
+  geom_histogram(aes(y = ..density..), bins = 6, color = "grey", fill = "forest green", alpha = 0.5) +
+  geom_density(alpha = 0.2) +
+  labs(x = "g_QCOM") +
+  theme_clean()
+ggpubr::ggarrange(p3,p4,ncol=2) %>% annotate_figure(top = "UFCF Growth Rate Histograms")
+```
+
+Ignoring the computational hiccups in estimating the density curve, both distributions appear to be left-skewed. However, we see that for QCOM, the very negative value is very likely an outlier. This could also be the case for TSLA. To further examine this issue, we can possibly look to see if there is a particular time that we can control for.
+
+```{r g_over_time, echo=F, warning=F}
+melt(gs.df, id.vars=c("Time","TSLA","QCOM"), measure.vars=c("TSLA","QCOM"), variable.name = "Company", value.name="Growth") %>% 
+  ggplot(aes(x=Time,y=Growth,linetype=Company)) + geom_line() + labs(title="Training Growth Rates",x="Normalized Time",y="Growth Rate") +
+  theme_economist_white()
+```
+
+This presents a slight problem, as there appears to be an outlier at $t=3$ . We can control for this by using an indicator function $I \{ t=3 \}$, but it would add an additional parameter to a very small training data set. To compensate, the intercept will be suppressed. The model, then, is given by 
+$$g_{TSLA,t} = \beta_1  g_{QCOM,t} + \beta_2  I\{t=3\} + u_t $$
+
+Using the available data - where TSLA and QCOM growth rates overlap in the standardized time - the median values of each coefficient are $\hat{\beta}_1 = -0.41$ and $\hat{\beta}_2 = -10.29$. Since the model utilizes a Bayesian approach, we can produce a predictive distribution of $\hat{g}_{TSLA,t}$ for the future years 2021-2041 using the values of $g_{QCOM,t}$ for the QCOM years $2000-2020$ and the posterior distribution of $\hat{\beta}_1$.
+
+To estimate the market value, we can use the following formula:
+
+$$V = FCF_0 [\sum\limits_{t=1}^T \frac{\prod\limits_{i=1}^t (1+g_i) - (1+\bar{g})^t}{(1+WACC)^t} + \frac{1+\bar{g}}{WACC-g}] $$
+
+Essentially, we manually calculate the first 20 present values using the predicted growth rates. Then the terminal value must be added. This can be calculated by assuming a constant growth rate $\bar{g}$. Since the first 20 values are calculated using predicted growth rates, we must omit the first 20 terms of the constant growth rate series:
+
+
+$$TV = FCF_0 \sum\limits_{t=T}^\infty \frac{(1+\bar{g})^t}{(1+WACC)^t} $$
+$$ = FCF_0 (\frac{1+\bar{g}}{WACC-\bar{g}} - \sum\limits_{t=1}^T \frac{(1+\bar{g})^t}{(1+WACC)^t}) $$
+
+In the market valuation formula, the adjusted terminal value is incorporated and simplified. To estimate the distribution of market values, we can use Monte-Carlo simulation methods. To take advantage of as much of the individual distributions as possible, there will be 10,000 samples. The growth rates are sampled from their perspective predictive distributions, except for $\bar{g}$ which is assumed to be 0.01 for simplicity. Although the expected value of the growth rate is calculated to be negative, we will use a positive but small growth rate based on qualitative judgment. When the final results are obtained, this issue may be revisited. The last term is the $WACC$. Using online sources\footnote{The estimates were found at https://finbox.com/NASDAQGS:TSLA/models/wacc}, the CAPM estimates a low 0.075 and a high 0.085 with a mode of 0.08. With this knowledge, we can sample WACC values from a triangle distribution.
+
+# Results
+
+After completing the calculations, and dividing the market values by the current number of shares outstanding, we obtain the following distribution of share prices:
+
+```{r share_dist, echo=F, warning=F}
+data.frame("Price" = Share_Values) %>% ggplot(aes(x=Price, y = ..density..)) + geom_density(color = "black", fill = "light blue", alpha = 0.8) +
+  xlim(0,100) +
+  labs(x = "Share Price", y = "Density", title = "Predicted Density of TSLA Share Price") + theme_clean()
+
+```
+
+The density plot is limited to values from 0 to 100. Values greater than 100 have a near-zero density, and while they may still be possible they appear very improbable. Additionally, all negative values were removed from the data. Considering this, we find that the median (and essentially the the point of greatest density) is \$8.93, in addition to a 95% credible interval of [\$0.01,\$58.33]. This implies that the current stock price of TSLA is overvalued by nearly \$600.
+
+# Discussion
+
+One immediate drawback from this method is the lack of available data. The linear regression was only estimated using six observations, which were used to make twenty predictions. Furthermore, while this value could be compared against the predictions of other more common stock valuation methods, it would still be difficult to obtain the true value of the stock price. Certainly, this model could be vastly improved with more data, and clearer targets.
+
+The other issue is the assumption that Qualcomm is a valid counter-factual for Tesla. Although both companies appear to be in a bubble, the environments were quite different - economically, culturally, and technologically. Many of these factors would be difficult to incorporate into a regression model, although not entirely impossible. Once again, this returns to the issue of gathering more observations to train the model on.
